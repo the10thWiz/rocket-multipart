@@ -1,0 +1,15 @@
+[package]
+name = "rocket-multipart"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = ["rand"]
+rand = ["dep:rand"]
+
+[dependencies]
+rand = { version = "0.8.5", optional = true }
+rocket = { version = "0.5.1", default-features = false }
+
+[dev-dependencies]
+async-stream = "0.3.5"
