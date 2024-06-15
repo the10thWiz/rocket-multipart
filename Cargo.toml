@@ -2,6 +2,12 @@
 name = "rocket-multipart"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.56"
+authors = ["Matthew Pomes <matthew.pomes@pm.me>"]
+description = "Provides a `multipart/mixed` Responder implementation"
+repository = "https://github.com/the10thWiz/rocket-multipart"
+keywords = ["rocket", "web-server"]
+license = "MIT"
 
 [features]
 default = ["rand"]
