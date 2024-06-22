@@ -14,8 +14,11 @@ default = ["rand"]
 rand = ["dep:rand"]
 
 [dependencies]
+memchr = "2.7.4"
 rand = { version = "0.8.5", optional = true }
 rocket = { version = "0.5.1", default-features = false }
+thiserror = "1.0.61"
+tokio-util = { version = "0.7.11", default-features = false, features = ["codec", "io"] }
 
 [dev-dependencies]
 async-stream = "0.3.5"
