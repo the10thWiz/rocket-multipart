@@ -1,3 +1,4 @@
+#![deny(missing_docs)]
 //! # Rocket Multipart Streams
 //!
 //! Implements support for Multipart streams in Rocket. The core type is
@@ -215,12 +216,14 @@ impl<'r, T: Stream<Item = MultipartSection<'r>> + Send + 'r> AsyncRead
     }
 }
 
+/// A single item in a multipart stream
 pub struct MultipartReadSection<'r, 'a> {
     headers: HeaderMap<'static>,
     reader: &'a mut MultipartReader<'r>,
 }
 
 impl<'a> MultipartReadSection<'_, 'a> {
+    /// Gets the list of headers specific to this multipart section
     pub fn headers(&self) -> &HeaderMap<'static> {
         &self.headers
     }
@@ -276,12 +279,16 @@ impl AsyncBufRead for MultipartReadSection<'_, '_> {
     }
 }
 
+/// Error returned by `MultipartReader`
 #[derive(Debug, Error)]
 pub enum Error {
+    /// An underlying IO error
     #[error(transparent)]
     Io(#[from] io::Error),
+    /// A header was not utf8 encoded
     #[error(transparent)]
     Encoding(#[from] Utf8Error),
+    /// The content-type of a multipart stream did not specify a boundary
     #[error("The content type of a multipart stream must specify a boundary")]
     BoundaryNotSpecified,
 }
@@ -453,6 +460,7 @@ impl Decoder for MultipartDecoder<'_> {
     }
 }
 
+/// The multipart data guard
 pub struct MultipartReader<'r> {
     stream: FramedRead<DataStream<'r>, MultipartDecoder<'r>>,
     buffer: MultipartFrame,
@@ -461,6 +469,7 @@ pub struct MultipartReader<'r> {
 
 impl<'r> MultipartReader<'r> {
     // Not `Stream`, b/c the output needs a mutable borrow from the reader
+    /// Gets the next section from this multipart reader.
     pub async fn next(
         &mut self,
     ) -> std::result::Result<Option<MultipartReadSection<'r, '_>>, Error> {
@@ -499,6 +508,7 @@ impl<'r> MultipartReader<'r> {
         }))
     }
 
+    /// The content type of the multipart stream as a whole. The primary type is always `multipart`
     pub fn contenty_type(&self) -> &'r ContentType {
         self.content_type
     }
