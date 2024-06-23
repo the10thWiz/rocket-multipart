@@ -7,8 +7,6 @@
 //! stream into a sequence of `MultipartReadSection`s.
 
 use std::{
-    borrow::Cow,
-    fmt::Display,
     io::{self, Cursor},
     mem::replace,
     pin::Pin,
@@ -33,13 +31,64 @@ use tokio_util::{
 
 /// A single section to be returned in a stream
 pub struct MultipartSection<'r> {
-    /// The content type of this section
-    pub content_type: Option<ContentType>,
-    /// The content encoding (compression) of this section
-    pub content_encoding: Option<Cow<'r, str>>,
-    /// The actual contents. Use `Box::pin()` to adapt any type
-    /// that implements `AsyncRead`.
-    pub content: Pin<Box<dyn AsyncRead + Send + 'r>>,
+    headers: HeaderMap<'static>,
+    content: Pin<Box<dyn AsyncRead + Send + 'r>>,
+}
+
+impl<'r> MultipartSection<'r> {
+    /// Construct a new MultipartSection from an async reader.
+    ///
+    /// If the readers is already in a `Box`, use [`Self::from_box`]
+    pub fn new<T: AsyncRead + Send + 'r>(reader: T) -> Self {
+        Self {
+            headers: HeaderMap::new(),
+            content: Box::pin(reader),
+        }
+    }
+
+    /// Construct a new MultipartSection from a Boxed async reader.
+    ///
+    /// Useful to avoid double boxing a reader.
+    pub fn from_box(reader: Box<dyn AsyncRead + Send + 'r>) -> Self {
+        Self {
+            headers: HeaderMap::new(),
+            content: Box::into_pin(reader),
+        }
+    }
+
+    /// Construct a new MultipartSection from a byte slice.
+    pub fn from_slice(slice: &'r [u8]) -> Self {
+        Self {
+            headers: HeaderMap::new(),
+            content: Box::pin(Cursor::new(slice)),
+        }
+    }
+
+    /// Add a header to this section. If this section already has a header with
+    /// the same name, this method adds an additional value.
+    pub fn add_header(mut self, header: impl Into<Header<'static>>) -> Self {
+        self.headers.add(header);
+        self
+    }
+
+    /// Replaces a header for this section. If this section already has a header
+    /// with the same name, this methods replaces all values with the new value.
+    pub fn replace_header(mut self, header: impl Into<Header<'static>>) -> Self {
+        self.headers.replace(header);
+        self
+    }
+
+    fn encode_headers(&self, boundary: &str) -> String {
+        let mut s = format!("\r\n--{boundary}\r\n");
+        for h in self.headers.iter() {
+            s.push_str(h.name.as_str());
+            s.push_str(": ");
+            s.push_str(h.value());
+            s.push_str("\r\n");
+        }
+        s.push_str("\r\n");
+        s
+    }
 }
 
 /// A stream of sections to be returned as a `multipart/mixed` stream.
@@ -125,16 +174,6 @@ enum StreamState<'r> {
     Footer(Cursor<Vec<u8>>),
 }
 
-struct HV<T>(&'static str, Option<T>);
-impl<T: Display> Display for HV<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match &self.1 {
-            Some(v) => write!(f, "{}: {}\r\n", self.0, v),
-            None => Ok(()),
-        }
-    }
-}
-
 impl<'r, T: Stream<Item = MultipartSection<'r>> + Send + 'r> AsyncRead
     for MultipartStreamInner<'r, T>
 {
@@ -149,14 +188,7 @@ impl<'r, T: Stream<Item = MultipartSection<'r>> + Send + 'r> AsyncRead
                 StreamState::Waiting => match stream.as_mut().poll_next(cx) {
                     Poll::Ready(Some(v)) => {
                         *state = StreamState::Header(
-                            Cursor::new(
-                                format!(
-                                    "\r\n--{boundary}\r\n{}{}\r\n",
-                                    HV("Content-Type", v.content_type),
-                                    HV("Content-Encoding", v.content_encoding),
-                                )
-                                .into_bytes(),
-                            ),
+                            Cursor::new(v.encode_headers(boundary).into_bytes()),
                             v.content,
                         );
                     }
@@ -510,7 +542,7 @@ impl<'r> MultipartReader<'r> {
     }
 
     /// The content type of the multipart stream as a whole. The primary type is always `multipart`
-    pub fn contenty_type(&self) -> &'r ContentType {
+    pub fn content_type(&self) -> &'r ContentType {
         self.content_type
     }
 }
@@ -556,21 +588,12 @@ mod tests {
         MultipartStream::new(
             "Sep",
             stream! {
-                yield MultipartSection {
-                    content_type: Some(ContentType::Text),
-                    content_encoding: None,
-                    content: Box::pin(b"How can I help you" as &[u8])
-                };
-                yield MultipartSection {
-                    content_type: Some(ContentType::Text),
-                    content_encoding: None,
-                    content: Box::pin(b"today?" as &[u8])
-                };
-                yield MultipartSection {
-                    content_type: Some(ContentType::Binary),
-                    content_encoding: None,
-                    content: Box::pin(&[0xFFu8, 0xFE, 0xF0] as &[u8])
-                };
+                yield MultipartSection::from_slice(b"How can I help you")
+                    .add_header(ContentType::Text);
+                yield MultipartSection::from_slice(b"today?")
+                    .add_header(ContentType::Text);
+                yield MultipartSection::from_slice(&[0xFF, 0xFE, 0xF0])
+                    .add_header(ContentType::Binary);
             },
         )
     }
