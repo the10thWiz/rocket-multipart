@@ -47,6 +47,18 @@ impl<'r> MultipartSection<'r> {
         }
     }
 
+    /// Serialize a JSON object into a MultipartSection
+    ///
+    /// Only available on `json` feature
+    #[cfg(feature = "json")]
+    pub fn from_json<T: ?Sized + serde::Serialize>(obj: &T) -> serde_json::Result<Self> {
+        let slice = serde_json::to_vec(obj)?;
+        Ok(Self {
+            headers: HeaderMap::new(),
+            content: Box::pin(Cursor::new(slice)),
+        })
+    }
+
     /// Add a header to this section. If this section already has a header with
     /// the same name, this method adds an additional value.
     pub fn add_header(mut self, header: impl Into<Header<'static>>) -> Self {
@@ -94,6 +106,8 @@ impl<T> MultipartStream<T> {
 
     /// Construct a stream, generating a random 15 character (alpha-numeric)
     /// boundary marker
+    ///
+    /// Only available on (default) `rand` feature
     #[cfg(feature = "rand")]
     pub fn new_random(stream: T) -> Self {
         use rand::{distributions::Alphanumeric, Rng};

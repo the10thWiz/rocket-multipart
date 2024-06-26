@@ -1,6 +1,5 @@
 use std::{
     io,
-    mem::replace,
     pin::Pin,
     str::{FromStr, Utf8Error},
     task::{ready, Context, Poll},
@@ -8,7 +7,7 @@ use std::{
 
 use memchr::{memchr, memmem::find, memrchr};
 use rocket::{
-    data::{DataStream, FromData, Limits, Outcome, ToByteUnit},
+    data::{DataStream, FromData, Outcome, ToByteUnit},
     futures::StreamExt,
     http::{ContentType, Header, HeaderMap, Status},
     tokio::io::{AsyncBufRead, AsyncRead, ReadBuf},
@@ -31,6 +30,12 @@ pub enum Error {
     /// A header was not utf8 encoded
     #[error(transparent)]
     Encoding(#[from] Utf8Error),
+    /// An error from `serde_json`
+    ///
+    /// Only available on `json` feature
+    #[cfg(feature = "json")]
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
     /// The content-type of a multipart stream did not specify a boundary
     #[error("The content type of a multipart stream must specify a boundary")]
     BoundaryNotSpecified,
@@ -55,6 +60,35 @@ impl<'a> MultipartReadSection<'_, 'a> {
     pub fn content_type(&self) -> Option<ContentType> {
         let s = self.headers.get_one("Content-Type")?;
         ContentType::from_str(s).ok()
+    }
+
+    /// Read the entire stream into a single bytes object.
+    ///
+    /// Should generally be more effecient than `read_to_end`, since it
+    /// generally avoids copying data into a new buffer.
+    pub async fn to_bytes(self) -> Result<Bytes> {
+        let mut raw_data = BytesMut::new();
+        while let MultipartFrame::Data(bytes) = &mut self.reader.buffer {
+            raw_data.unsplit(bytes.split());
+            match self.reader.stream.next().await {
+                Some(Ok(next)) => self.reader.buffer = next,
+                Some(Err(e)) => {
+                    self.reader.buffer = MultipartFrame::End;
+                    return Err(e);
+                }
+                None => self.reader.buffer = MultipartFrame::End,
+            }
+        }
+        Ok(raw_data.freeze())
+    }
+
+    /// Read the entire stream, and parse it as a JSON object
+    ///
+    /// Only available on `json` feature
+    #[cfg(feature = "json")]
+    pub async fn json<T: serde::de::DeserializeOwned>(self) -> Result<T> {
+        let bytes = self.to_bytes().await?;
+        Ok(serde_json::from_slice(&bytes)?)
     }
 }
 
@@ -124,7 +158,7 @@ struct MultipartDecoder<'r> {
 enum MultipartFrame {
     Boundary,
     Header(Header<'static>),
-    Data(Bytes),
+    Data(BytesMut),
     End,
 }
 
@@ -213,7 +247,7 @@ impl Decoder for MultipartDecoder<'_> {
                     if let Some(pos) = find(src, self.boundary.as_bytes()) {
                         if pos < 4 {
                             let data = src.split_to(pos + 1);
-                            return Ok(Some(MultipartFrame::Data(data.freeze())));
+                            return Ok(Some(MultipartFrame::Data(data)));
                         }
                         if pos + self.boundary.len() + 2 > src.len() {
                             let data = src.split_to(pos - 4);
@@ -221,7 +255,7 @@ impl Decoder for MultipartDecoder<'_> {
                             if data.is_empty() {
                                 return Ok(None);
                             } else {
-                                return Ok(Some(MultipartFrame::Data(data.freeze())));
+                                return Ok(Some(MultipartFrame::Data(data)));
                             }
                         }
                         if &src[pos - 4..pos] == b"\r\n--"
@@ -230,7 +264,7 @@ impl Decoder for MultipartDecoder<'_> {
                             self.state = MultipartDecoderState::End;
                             if pos - 4 > 0 {
                                 let data = src.split_to(pos - 4);
-                                return Ok(Some(MultipartFrame::Data(data.freeze())));
+                                return Ok(Some(MultipartFrame::Data(data)));
                             }
                             continue;
                         }
@@ -238,11 +272,11 @@ impl Decoder for MultipartDecoder<'_> {
                             && &src[pos + self.boundary.len()..][..2] != b"\r\n"
                         {
                             let data = src.split_to(pos + self.boundary.len());
-                            return Ok(Some(MultipartFrame::Data(data.freeze())));
+                            return Ok(Some(MultipartFrame::Data(data)));
                         } else {
                             if pos > 4 {
                                 let data = src.split_to(pos - 4);
-                                return Ok(Some(MultipartFrame::Data(data.freeze())));
+                                return Ok(Some(MultipartFrame::Data(data)));
                             }
                             let _ = src.split_to(pos + self.boundary.len() + "\r\n".len());
                             self.state = MultipartDecoderState::Headers;
@@ -258,7 +292,7 @@ impl Decoder for MultipartDecoder<'_> {
                         if data.is_empty() {
                             return Ok(None);
                         } else {
-                            return Ok(Some(MultipartFrame::Data(data.freeze())));
+                            return Ok(Some(MultipartFrame::Data(data)));
                         }
                     }
                 }
@@ -322,10 +356,7 @@ impl<'r> MultipartReader<'r> {
         }
 
         let mut headers = HeaderMap::new();
-        while !matches!(self.buffer, MultipartFrame::Data(_)) {
-            if let MultipartFrame::Header(h) = replace(&mut self.buffer, MultipartFrame::Boundary) {
-                headers.add(h);
-            }
+        loop {
             match self.stream.next().await {
                 Some(Ok(MultipartFrame::End)) | None => {
                     self.buffer = MultipartFrame::End;
@@ -335,7 +366,16 @@ impl<'r> MultipartReader<'r> {
                         break;
                     }
                 }
-                Some(Ok(val)) => self.buffer = val,
+                Some(Ok(MultipartFrame::Header(header))) => headers.add(header),
+                Some(Ok(MultipartFrame::Boundary)) => {
+                    self.buffer = MultipartFrame::Boundary;
+                    break;
+                }
+                Some(Ok(val @ MultipartFrame::Data(_))) => {
+                    self.buffer = val;
+                    break;
+                }
+                // Some(Ok(val)) => self.buffer = val,
                 Some(Err(e)) => return Err(e),
             }
         }
@@ -372,7 +412,7 @@ impl<'r> FromData<'r> for MultipartReader<'r> {
                             boundary,
                         },
                     ),
-                    buffer: MultipartFrame::Data(Bytes::new()),
+                    buffer: MultipartFrame::Data(BytesMut::new()),
                     content_type,
                 })
             } else {

@@ -1,5 +1,11 @@
 # Change log
 
+## 0.2.1
+
+- Fix bug that prevents reading empty sections
+- Add configuration option for size limit when reading
+- Added optional `json` feature
+
 ## 0.2.0
 
 - Add support for arbitrary headers in `MultipartSection`

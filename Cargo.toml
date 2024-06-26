@@ -1,6 +1,6 @@
 [package]
 name = "rocket-multipart"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 rust-version = "1.56"
 authors = ["Matthew Pomes <matthew.pomes@pm.me>"]
@@ -12,11 +12,14 @@ license = "MIT"
 [features]
 default = ["rand"]
 rand = ["dep:rand"]
+json = ["dep:serde_json", "dep:serde"]
 
 [dependencies]
 memchr = "2.7.4"
 rand = { version = "0.8.5", optional = true }
 rocket = { version = "0.5.1", default-features = false }
+serde = { version = "1.0.203", default-features = false, optional = true, features = ["std"] }
+serde_json = { version = "1.0.118", default-features = false, optional = true, features = ["std"] }
 thiserror = "1.0.61"
 tokio-util = { version = "0.7.11", default-features = false, features = ["codec", "io"] }
 

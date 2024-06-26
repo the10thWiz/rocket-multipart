@@ -4,9 +4,7 @@ use rocket::{
     get,
     http::{ContentType, Header, Status},
     local::blocking::Client,
-    post, routes,
-    tokio::io::AsyncReadExt,
-    Build, Rocket,
+    post, routes, Build, Rocket,
 };
 
 use crate::*;
@@ -30,23 +28,60 @@ async fn multipart_data(mut multipart: MultipartReader<'_>) -> std::result::Resu
     use std::fmt::Write as _;
     let mut s = String::new();
     write!(s, "M CT: {}\n", multipart.content_type()).unwrap();
-    while let Some(mut a) = multipart.next().await.map_err(|_| Status::BadRequest)? {
+    while let Some(a) = multipart.next().await.map_err(|_| Status::BadRequest)? {
         if let Some(ct) = a.headers().get_one("Content-Type") {
             write!(s, "CT: {}\n", ct).unwrap();
         }
-        let mut buf = vec![];
-        a.read_to_end(&mut buf).await.unwrap();
+        let buf = a.to_bytes().await.unwrap();
         if let Ok(val) = std::str::from_utf8(&buf) {
             write!(s, "V: {}\n", val).unwrap();
         } else {
-            write!(s, "R: {:?}\n", buf).unwrap();
+            write!(s, "R: {:?}\n", &buf[..]).unwrap();
         }
     }
     Ok(s)
 }
 
+#[cfg(feature = "json")]
+#[post("/json", data = "<multipart>")]
+async fn json_data(mut multipart: MultipartReader<'_>) -> std::result::Result<String, Status> {
+    use std::fmt::Write as _;
+    let mut s = String::new();
+    write!(s, "M CT: {}\n", multipart.content_type()).unwrap();
+    while let Some(a) = multipart.next().await.map_err(|_| Status::BadRequest)? {
+        if let Some(ct) = a.headers().get_one("Content-Type") {
+            write!(s, "CT: {}\n", ct).unwrap();
+        }
+        write!(
+            s,
+            "{:?}\n",
+            a.json::<serde_json::Value>()
+                .await
+                .map(|v| serde_json::to_string(&v).unwrap())
+        )
+        .unwrap();
+    }
+    Ok(s)
+}
+#[cfg(feature = "json")]
+#[get("/json")]
+fn json_send() -> MultipartStream<impl Stream<Item = MultipartSection<'static>>> {
+    MultipartStream::new(
+        "Sep",
+        stream! {
+            yield MultipartSection::from_json(&serde_json::json!({"val": 0})).unwrap()
+                .add_header(ContentType::JSON);
+        },
+    )
+}
+
 fn rocket() -> Rocket<Build> {
-    rocket::build().mount("/", routes![multipart_route, multipart_data])
+    let mut rocket = rocket::build().mount("/", routes![multipart_route, multipart_data]);
+    #[cfg(feature = "json")]
+    {
+        rocket = rocket.mount("/", routes![json_data, json_send]);
+    }
+    rocket
 }
 
 fn example_multipart_stream() -> Vec<u8> {
@@ -108,4 +143,69 @@ CT: application/octet-stream
 R: [255, 254, 240]
 "
     );
+}
+
+#[test]
+fn empty_section() {
+    let client = Client::untracked(rocket()).unwrap();
+    let mut expected_contents = vec![];
+    expected_contents.extend_from_slice(b"--Sep\r\n");
+    expected_contents.extend_from_slice(b"Content-Type: text/plain\r\n");
+    expected_contents.extend_from_slice(b"\r\n");
+    expected_contents.extend_from_slice(b"\r\n--Sep\r\n");
+    expected_contents.extend_from_slice(b"Content-Type: text/fake\r\n");
+    expected_contents.extend_from_slice(b"\r\nCT");
+    expected_contents.extend_from_slice(b"\r\n--Sep--");
+    let res = client
+        .post("/mixed")
+        .header(Header::new("Content-Type", "multipart/mixed; boundary=Sep"))
+        .body(expected_contents)
+        .dispatch();
+    assert_eq!(res.status(), Status::Ok);
+    assert_eq!(
+        res.into_string().unwrap(),
+        "M CT: multipart/mixed; boundary=Sep
+CT: text/plain
+V: 
+CT: text/fake
+V: CT
+"
+    );
+}
+
+#[test]
+#[cfg(feature = "json")]
+fn json_decode() {
+    let client = Client::untracked(rocket()).unwrap();
+    let mut expected_contents = vec![];
+    expected_contents.extend_from_slice(b"--Sep\r\n");
+    expected_contents.extend_from_slice(b"Content-Type: application/json\r\n");
+    expected_contents.extend_from_slice(b"\r\n{ \"val\": 0 }");
+    expected_contents.extend_from_slice(b"\r\n--Sep--");
+    let res = client
+        .post("/json")
+        .header(Header::new("Content-Type", "multipart/mixed; boundary=Sep"))
+        .body(expected_contents)
+        .dispatch();
+    assert_eq!(res.status(), Status::Ok);
+    assert_eq!(
+        res.into_string().unwrap(),
+        "M CT: multipart/mixed; boundary=Sep
+CT: application/json
+Ok(\"{\\\"val\\\":0}\")
+"
+    );
+}
+#[test]
+#[cfg(feature = "json")]
+fn json_encode() {
+    let client = Client::untracked(rocket()).unwrap();
+    let mut expected_contents = vec![];
+    expected_contents.extend_from_slice(b"\r\n--Sep\r\n");
+    expected_contents.extend_from_slice(b"Content-Type: application/json\r\n");
+    expected_contents.extend_from_slice(b"\r\n{\"val\":0}");
+    expected_contents.extend_from_slice(b"\r\n--Sep--\r\n");
+    let res = client.get("/json").dispatch();
+    assert_eq!(res.status(), Status::Ok);
+    assert_eq!(res.into_bytes().unwrap(), expected_contents);
 }
